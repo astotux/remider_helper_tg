@@ -51,6 +51,8 @@ async function bootstrap() {
     logger
   });
 
+  let schedulerRef = null;
+
   const { bot, deliveryService } = createTelegramBot({
     botToken: config.botToken,
     userRepo,
@@ -62,14 +64,19 @@ async function bootstrap() {
       new PermissionService({ telegramGateway, logger }),
     deliveryServiceFactory: (telegramGateway) =>
       new DeliveryService({ telegramGateway, occurrenceRepo, completionRepo, logger }),
-    completionServiceFactory: (delService) =>
+    completionServiceFactory: (delService, telegramGateway) =>
       new CompletionService({
         db,
         occurrenceRepo,
         completionRepo,
         deliveryService: delService,
+        reminderService,
+        telegramGateway,
         logger
       }),
+    onReminderActivated: () => {
+      void schedulerRef?.tick();
+    },
     logger
   });
 
@@ -92,6 +99,7 @@ async function bootstrap() {
     config,
     logger
   });
+  schedulerRef = scheduler;
 
   await bot.telegram.setMyCommands([
     { command: 'start', description: 'Главное меню' },

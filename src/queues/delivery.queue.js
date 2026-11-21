@@ -158,7 +158,10 @@ export class DeliveryQueue {
       this.queueRepo.markSent(queueItem.id);
 
       if (result.scheduleType === 'once') {
-        this.reminderRepo.archiveAndDeactivate(result.reminderId);
+        const rem = this.reminderRepo.findById(result.reminderId);
+        if (rem && !rem.next_run_at && !rem.is_archived) {
+          this.reminderRepo.archiveAndDeactivate(result.reminderId);
+        }
       }
 
       this.logger?.info('Напоминание отправлено', {

@@ -407,18 +407,24 @@ export class TimezoneService {
 
       for (const reminder of reminders) {
         let newNextRunAt = reminder.next_run_at;
+        let newSeriesEndsAt = reminder.series_ends_at;
+
         if (reminder.is_active) {
-          newNextRunAt = computeNextRunAt({
-            scheduleType: reminder.schedule_type,
-            scheduleData: reminder.schedule_data,
-            timezone: resolved,
-            fromUtc: nowUtc,
-            inclusive: false
-          });
+          // Если активное напоминание не находится прямо сейчас внутри открытого окна повторов — пересчитываем next_run_at
+          if (!reminder.series_id) {
+            newNextRunAt = computeNextRunAt({
+              scheduleType: reminder.schedule_type,
+              scheduleData: reminder.schedule_data,
+              timezone: resolved,
+              fromUtc: nowUtc,
+              inclusive: false
+            });
+          }
         }
         this.reminderRepo.update(reminder.id, {
           timezone: resolved,
-          nextRunAt: newNextRunAt
+          nextRunAt: newNextRunAt,
+          seriesEndsAt: newSeriesEndsAt
         });
         recalculatedCount += 1;
       }

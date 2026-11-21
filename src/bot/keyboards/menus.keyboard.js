@@ -84,7 +84,8 @@ export function reminderEditFieldKeyboard(reminder) {
     [
       { text: '🕒 Время', callback_data: `edit:f:time:${reminder.id}` },
       { text: '📅 Тип расписания', callback_data: `edit:f:sched:${reminder.id}` }
-    ]
+    ],
+    [{ text: '🔁 Повтор в окне', callback_data: `edit:f:repeat:${reminder.id}` }]
   ];
 
   if (reminder.schedule_type === 'weekly') {
@@ -184,6 +185,115 @@ export function scheduleTypeKeyboard({ prefix = 'wiz:st', backCb = null, cancelC
   if (backCb) nav.push({ text: '⬅️ Назад', callback_data: backCb });
   if (cancelCb) nav.push({ text: '❌ Отмена', callback_data: cancelCb });
   if (nav.length > 0) rows.push(nav);
+
+  return { inline_keyboard: rows };
+}
+
+export function dateQuickPickKeyboard({ backCb = 'wiz:back', cancelCb = 'wiz:cancel' } = {}) {
+  return {
+    inline_keyboard: [
+      [
+        { text: '📅 Сегодня', callback_data: 'wiz:date_pick:today' },
+        { text: '📅 Завтра', callback_data: 'wiz:date_pick:tomorrow' }
+      ],
+      [
+        ...(backCb ? [{ text: '⬅️ Назад', callback_data: backCb }] : []),
+        ...(cancelCb ? [{ text: '❌ Отмена', callback_data: cancelCb }] : [])
+      ]
+    ]
+  };
+}
+
+export function repeatAskKeyboard({ backCb = 'wiz:back', cancelCb = 'wiz:cancel' } = {}) {
+  return {
+    inline_keyboard: [
+      [{ text: '🔔 Нет, отправить 1 раз', callback_data: 'wiz:rep:no' }],
+      [{ text: '🔁 Да, повторять с интервалом', callback_data: 'wiz:rep:yes' }],
+      [
+        ...(backCb ? [{ text: '⬅️ Назад', callback_data: backCb }] : []),
+        ...(cancelCb ? [{ text: '❌ Отмена', callback_data: cancelCb }] : [])
+      ]
+    ]
+  };
+}
+
+export function repeatStepKeyboard({ backCb = 'wiz:back', cancelCb = 'wiz:cancel' } = {}) {
+  return {
+    inline_keyboard: [
+      [
+        { text: '15 минут', callback_data: 'wiz:rep_step:15' },
+        { text: '30 минут', callback_data: 'wiz:rep_step:30' }
+      ],
+      [
+        { text: '1 час', callback_data: 'wiz:rep_step:60' },
+        { text: '2 часа', callback_data: 'wiz:rep_step:120' }
+      ],
+      [
+        ...(backCb ? [{ text: '⬅️ Назад', callback_data: backCb }] : []),
+        ...(cancelCb ? [{ text: '❌ Отмена', callback_data: cancelCb }] : [])
+      ]
+    ]
+  };
+}
+
+export function repeatDurationKeyboard({
+  scheduleType = 'once',
+  backCb = 'wiz:back',
+  cancelCb = 'wiz:cancel'
+} = {}) {
+  const rows = [
+    [
+      { text: '1 час', callback_data: 'wiz:rep_dur:60' },
+      { text: '2 часа', callback_data: 'wiz:rep_dur:120' },
+      { text: '3 часа', callback_data: 'wiz:rep_dur:180' }
+    ],
+    [
+      { text: '5 часов', callback_data: 'wiz:rep_dur:300' },
+      { text: '8 часов', callback_data: 'wiz:rep_dur:480' },
+      { text: '12 часов', callback_data: 'wiz:rep_dur:720' }
+    ]
+  ];
+
+  if (scheduleType === 'once') {
+    rows.push([{ text: '♾ Пока не выполнят / не остановят', callback_data: 'wiz:rep_dur:0' }]);
+  }
+
+  rows.push([
+    ...(backCb ? [{ text: '⬅️ Назад', callback_data: backCb }] : []),
+    ...(cancelCb ? [{ text: '❌ Отмена', callback_data: cancelCb }] : [])
+  ]);
+
+  return { inline_keyboard: rows };
+}
+
+export function repeatCompletionKeyboard({
+  contextType,
+  hasMentions = false,
+  backCb = 'wiz:back',
+  cancelCb = 'wiz:cancel'
+} = {}) {
+  const rows = [];
+
+  if (contextType === 'group') {
+    rows.push([{ text: '👥 Остановить, когда выполнят все в чате', callback_data: 'wiz:cm:stop_all' }]);
+    rows.push([{ text: '☝️ Остановить, когда выполнит любой 1', callback_data: 'wiz:cm:stop_one' }]);
+    rows.push([{ text: '🔢 Остановить после N человек (указать)', callback_data: 'wiz:cm:stop_count' }]);
+    if (hasMentions) {
+      rows.push([
+        { text: '📣 Остановить, когда выполнят упомянутые', callback_data: 'wiz:cm:stop_mentioned' }
+      ]);
+    }
+    rows.push([{ text: '✅ Вкл (синхронизировать, не останавливать)', callback_data: 'wiz:cm:on' }]);
+  } else {
+    rows.push([{ text: '🛑 Остановить повторы после нажатия «Выполнено»', callback_data: 'wiz:cm:stop_one' }]);
+    rows.push([{ text: '✅ Включить (не останавливать повторы)', callback_data: 'wiz:cm:on' }]);
+  }
+
+  rows.push([{ text: '✖️ Не включать кнопку', callback_data: 'wiz:cm:off' }]);
+  rows.push([
+    ...(backCb ? [{ text: '⬅️ Назад', callback_data: backCb }] : []),
+    ...(cancelCb ? [{ text: '❌ Отмена', callback_data: cancelCb }] : [])
+  ]);
 
   return { inline_keyboard: rows };
 }

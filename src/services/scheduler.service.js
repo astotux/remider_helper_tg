@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { DateTime } from 'luxon';
 import { computeMissedAndNext } from '../utils/date.utils.js';
 
@@ -75,11 +76,21 @@ export class SchedulerService {
             continue;
           }
 
-          const { missedSlots, totalMissed, nextRunAt } = computeMissedAndNext({
+          const {
+            missedSlots,
+            totalMissed,
+            occurrenceSeriesId,
+            nextRunAt,
+            nextSeriesId,
+            nextSeriesEndsAt
+          } = computeMissedAndNext({
             scheduleType: reminder.schedule_type,
             scheduleData: reminder.schedule_data,
             timezone: reminder.timezone,
             currentNextRunAtIso: reminder.next_run_at,
+            seriesId: reminder.series_id,
+            seriesEndsAtIso: reminder.series_ends_at,
+            seriesIdFactory: () => `s_${crypto.randomUUID()}`,
             nowUtc,
             maxMissed: this.maxMissedPerReminder
           });
@@ -100,6 +111,7 @@ export class SchedulerService {
               reminderId: reminder.id,
               chatId: reminder.context_id,
               scheduledAt: slotIso,
+              seriesId: occurrenceSeriesId || null,
               status: 'queued'
             });
 
@@ -114,7 +126,9 @@ export class SchedulerService {
           }
 
           this.reminderRepo.update(reminder.id, {
-            nextRunAt: reminder.schedule_type === 'once' ? null : nextRunAt
+            nextRunAt,
+            seriesId: nextSeriesId ?? null,
+            seriesEndsAt: nextSeriesEndsAt ?? null
           });
         }
       });

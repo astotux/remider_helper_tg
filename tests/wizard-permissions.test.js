@@ -132,6 +132,10 @@ describe('WizardFlow concurrent multi-user FSM & double-click safety', () => {
 
     // Завершаем шаг за шагом для Admin 1
     await wizard.handleMessage(createFakeCtx({ chatId: -1001, userId: 1, text: '09:30' }));
+    await wizard.handleCallback(
+      createFakeCtx({ chatId: -1001, userId: 1, callbackData: 'wiz:rep:no' }),
+      'wiz:rep:no'
+    );
     await wizard.handleMessage(createFakeCtx({ chatId: -1001, userId: 1, text: 'Утренний отчёт' }));
     await wizard.handleCallback(
       createFakeCtx({ chatId: -1001, userId: 1, callbackData: 'wiz:skip_desc' }),

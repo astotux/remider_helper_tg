@@ -3,8 +3,9 @@ import { loadConfig } from '../config/config.js';
 import { createLogger } from '../utils/logger.js';
 import { openDatabase, closeDatabase } from './db.js';
 import * as m001 from './migrations/001_initial.js';
+import * as m002 from './migrations/002_interval_series.js';
 
-const MIGRATIONS = [m001];
+const MIGRATIONS = [m001, m002];
 
 export function runMigrations(db, logger = null) {
   db.exec(`
@@ -23,12 +24,22 @@ export function runMigrations(db, logger = null) {
   for (const migration of MIGRATIONS) {
     if (appliedIds.has(migration.id)) continue;
 
-    const applyTx = db.transaction(() => {
-      migration.up(db);
-      insertMigration.run(migration.id, new Date().toISOString());
-    });
+    if (migration.disableForeignKeys) {
+      db.pragma('foreign_keys = OFF');
+    }
 
-    applyTx();
+    try {
+      const applyTx = db.transaction(() => {
+        migration.up(db);
+        insertMigration.run(migration.id, new Date().toISOString());
+      });
+      applyTx();
+    } finally {
+      if (migration.disableForeignKeys) {
+        db.pragma('foreign_keys = ON');
+      }
+    }
+
     count += 1;
     logger?.info(`Применена миграция БД: ${migration.id}`);
   }

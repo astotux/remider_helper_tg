@@ -16,11 +16,16 @@ import {
 } from '../../utils/validation.utils.js';
 import {
   booleanChoiceKeyboard,
+  dateQuickPickKeyboard,
   mainMenuKeyboard,
   mentionsStepKeyboard,
   previewConfirmKeyboard,
   reminderEditFieldKeyboard,
   reminderManageKeyboard,
+  repeatAskKeyboard,
+  repeatCompletionKeyboard,
+  repeatDurationKeyboard,
+  repeatStepKeyboard,
   scheduleTypeKeyboard,
   stepControlsKeyboard,
   timezoneCandidatesKeyboard,
@@ -28,6 +33,75 @@ import {
   weekdaysKeyboard
 } from '../keyboards/menus.keyboard.js';
 import { renderMessage, safeAnswerCbQuery } from '../telegram.adapter.js';
+
+function formatStopConditionLabel({ completionEnabled, stopOnComplete, stopMode, requiredCompletions }) {
+  if (!completionEnabled) return 'выключена';
+  if (!stopOnComplete) return 'включена (не останавливает повторы)';
+  switch (stopMode) {
+    case 'all_members':
+      return 'включена (остановит повторы, когда выполнят все в чате)';
+    case 'mentioned':
+      return 'включена (остановит повторы, когда выполнят упомянутые)';
+    case 'custom_count':
+      return `включена (остановит повторы после ${requiredCompletions || 1} чел.)`;
+    case 'any_one':
+    default:
+      return 'включена (остановит повторы после 1-го выполнения)';
+  }
+}
+
+function parseIntervalMinutesInput(text) {
+  const s = String(text || '').trim().toLowerCase().replace(',', '.');
+  const hourMatch = /^(\d+(?:\.\d+)?)\s*(?:ч|час|часа|часов|h)$/i.exec(s);
+  if (hourMatch) {
+    const mins = Math.round(Number.parseFloat(hourMatch[1]) * 60);
+    if (mins >= 1 && mins <= 1440) return { valid: true, value: mins };
+    return { valid: false, error: 'Интервал должен быть от 1 минуты до 24 часов.' };
+  }
+  const minMatch = /^(\d+)\s*(?:м|мин|минут|минуты|m)?$/i.exec(s);
+  if (minMatch) {
+    const mins = Number.parseInt(minMatch[1], 10);
+    if (mins >= 1 && mins <= 1440) return { valid: true, value: mins };
+    return { valid: false, error: 'Интервал должен быть от 1 до 1440 минут (24 часа).' };
+  }
+  return {
+    valid: false,
+    error: 'Укажите интервал в минутах (например, <code>15</code>, <code>45</code>) или часах (<code>2ч</code>).'
+  };
+}
+
+function parseDurationMinutesInput(text, scheduleType = 'once') {
+  const s = String(text || '').trim().toLowerCase().replace(',', '.');
+  const maxDur = scheduleType === 'once' ? 10080 : 1439;
+  const minMatch = /^(\d+)\s*(?:м|мин|минут|минуты|m)$/i.exec(s);
+  if (minMatch) {
+    const mins = Number.parseInt(minMatch[1], 10);
+    if (mins >= 1 && mins <= maxDur) return { valid: true, value: mins };
+    return {
+      valid: false,
+      error:
+        scheduleType === 'once'
+          ? 'Длительность должна быть от 1 минуты до 7 дней.'
+          : 'Для повторяющегося расписания длительность окна должна быть меньше 24 часов.'
+    };
+  }
+  const hourMatch = /^(\d+(?:\.\d+)?)\s*(?:ч|час|часа|часов|h)?$/i.exec(s);
+  if (hourMatch) {
+    const mins = Math.round(Number.parseFloat(hourMatch[1]) * 60);
+    if (mins >= 1 && mins <= maxDur) return { valid: true, value: mins };
+    return {
+      valid: false,
+      error:
+        scheduleType === 'once'
+          ? 'Длительность должна быть от 1 минуты до 7 дней (168 часов).'
+          : 'Для повторяющегося расписания длительность окна должна быть до 23 часов.'
+    };
+  }
+  return {
+    valid: false,
+    error: 'Укажите длительность в часах (например, <code>5</code> или <code>1.5ч</code>) либо минутах (<code>90м</code>).'
+  };
+}
 
 export function formatReminderDetails(reminder) {
   const status = reminder.is_active ? '🟢 Активно' : '⏸ Приостановлено';
@@ -49,6 +123,12 @@ export function formatReminderDetails(reminder) {
     `Часовой пояс: <b>${escapeHtml(formatTimezoneHuman(reminder.timezone))}</b>`
   ];
 
+  if (reminder.series_id && reminder.series_ends_at) {
+    lines.push(
+      `Текущее окно повторов до: <b>${escapeHtml(formatUtcInTimezone(reminder.series_ends_at, reminder.timezone))}</b>`
+    );
+  }
+
   if (reminder.description) {
     lines.push(`Описание: добавлено (${reminder.description.length} симв.)`);
   }
@@ -58,7 +138,14 @@ export function formatReminderDetails(reminder) {
   if (reminder.link_title && reminder.link_url) {
     lines.push(`Кнопка-ссылка: ${escapeHtml(reminder.link_title)} (${escapeHtml(reminder.link_url)})`);
   }
-  lines.push(`Кнопка «Выполнено»: ${reminder.completion_enabled ? 'включена ✅' : 'выключена'}`);
+  lines.push(
+    `Кнопка «Выполнено»: ${formatStopConditionLabel({
+      completionEnabled: reminder.completion_enabled,
+      stopOnComplete: reminder.stop_on_complete,
+      stopMode: reminder.stop_mode,
+      requiredCompletions: reminder.required_completions
+    })}`
+  );
 
   if (reminder.mentions_enabled && reminder.mentions_data?.length > 0) {
     const names = reminder.mentions_data
@@ -140,6 +227,7 @@ export class WizardFlow {
     reminderService,
     timezoneService,
     permissionService,
+    onReminderActivated = null,
     logger = null
   }) {
     this.sessionRepo = sessionRepo;
@@ -147,6 +235,7 @@ export class WizardFlow {
     this.reminderService = reminderService;
     this.timezoneService = timezoneService;
     this.permissionService = permissionService;
+    this.onReminderActivated = onReminderActivated;
     this.logger = logger;
   }
 
@@ -171,6 +260,9 @@ export class WizardFlow {
       linkTitle: null,
       linkUrl: null,
       completionEnabled: false,
+      stopOnComplete: false,
+      stopMode: 'none',
+      requiredCompletions: null,
       mentionsEnabled: false,
       mentionsData: [],
       timezone: this.timezoneService.getContextTimezone(contextType, contextId)
@@ -194,7 +286,9 @@ export class WizardFlow {
       return;
     }
 
-    if (field === 'completion') {
+    const hasRepeat = Boolean(reminder.schedule_data?.repeat);
+
+    if (field === 'completion' && !hasRepeat) {
       const updated = this.reminderService.updateReminder(reminder.id, {
         completionEnabled: !reminder.completion_enabled
       });
@@ -216,8 +310,15 @@ export class WizardFlow {
       contextType,
       contextId,
       scheduleType: reminder.schedule_type,
-      scheduleData: { ...reminder.schedule_data },
+      scheduleData: {
+        ...reminder.schedule_data,
+        repeat: reminder.schedule_data?.repeat ? { ...reminder.schedule_data.repeat } : null
+      },
       timezone: reminder.timezone,
+      completionEnabled: reminder.completion_enabled,
+      stopOnComplete: reminder.stop_on_complete,
+      stopMode: reminder.stop_mode,
+      requiredCompletions: reminder.required_completions,
       mentionsData: [...(reminder.mentions_data || [])],
       linkTitle: reminder.link_title,
       linkUrl: reminder.link_url
@@ -228,11 +329,13 @@ export class WizardFlow {
       description: 'edit:description',
       photo: 'edit:photo',
       link: 'edit:link_title',
+      completion: 'edit:completion',
       mentions: 'edit:mentions',
       time: 'edit:time',
       days: 'edit:days',
       date: 'edit:date',
-      sched: 'edit:sched_type'
+      sched: 'edit:sched_type',
+      repeat: 'edit:repeat_ask'
     };
 
     const targetState = stateMap[field];
@@ -255,8 +358,14 @@ export class WizardFlow {
         if (draft.scheduleType === 'weekly') return 'create:schedule_days';
         if (draft.scheduleType === 'once') return 'create:schedule_date';
         return 'create:schedule_type';
-      case 'create:title':
+      case 'create:repeat_ask':
         return 'create:schedule_time';
+      case 'create:repeat_step':
+        return 'create:repeat_ask';
+      case 'create:repeat_duration':
+        return 'create:repeat_step';
+      case 'create:title':
+        return draft.scheduleData?.repeat ? 'create:repeat_duration' : 'create:repeat_ask';
       case 'create:description':
         return 'create:title';
       case 'create:photo':
@@ -269,8 +378,10 @@ export class WizardFlow {
         return 'create:link_title';
       case 'create:completion':
         return draft.linkUrl ? 'create:link_url' : 'create:link_ask';
-      case 'create:mentions':
+      case 'create:stop_count':
         return 'create:completion';
+      case 'create:mentions':
+        return draft.stopMode === 'custom_count' ? 'create:stop_count' : 'create:completion';
       case 'create:timezone':
         return 'create:mentions';
       case 'create:preview': {
@@ -342,6 +453,29 @@ export class WizardFlow {
           await this.renderStep(ctx, prev, draft);
           return true;
         }
+        if (state === 'edit:sched_repeat_ask') {
+          this.sessionRepo.set(sessionKey, 'edit:sched_time', draft);
+          await this.renderStep(ctx, 'edit:sched_time', draft);
+          return true;
+        }
+        if (state === 'edit:repeat_step' || state === 'edit:sched_repeat_step') {
+          const prev = state === 'edit:sched_repeat_step' ? 'edit:sched_repeat_ask' : 'edit:repeat_ask';
+          this.sessionRepo.set(sessionKey, prev, draft);
+          await this.renderStep(ctx, prev, draft);
+          return true;
+        }
+        if (state === 'edit:repeat_dur' || state === 'edit:sched_repeat_dur') {
+          const prev = state === 'edit:sched_repeat_dur' ? 'edit:sched_repeat_step' : 'edit:repeat_step';
+          this.sessionRepo.set(sessionKey, prev, draft);
+          await this.renderStep(ctx, prev, draft);
+          return true;
+        }
+        if (state === 'edit:stop_count') {
+          this.sessionRepo.set(sessionKey, 'edit:completion', draft);
+          await this.renderStep(ctx, 'edit:completion', draft);
+          return true;
+        }
+
         this.sessionRepo.delete(sessionKey);
         const rem = this.reminderService.getById(draft.reminderId);
         if (rem) {
@@ -360,7 +494,7 @@ export class WizardFlow {
       return true;
     }
 
-    // Выбор типа расписания (create или edit)
+    // Выбор базового типа расписания (daily / weekly / once)
     if (data.startsWith('wiz:st:')) {
       const type = data.split(':')[2];
       if (!['daily', 'weekly', 'once'].includes(type)) {
@@ -374,12 +508,25 @@ export class WizardFlow {
       }
 
       draft.scheduleType = type;
-      draft.scheduleData =
-        type === 'weekly'
-          ? { days: draft.scheduleData?.days || [], time: draft.scheduleData?.time || null }
-          : type === 'once'
-            ? { date: draft.scheduleData?.date || null, time: draft.scheduleData?.time || null }
-            : { time: draft.scheduleData?.time || null };
+      const prevRepeat = draft.scheduleData?.repeat || null;
+      if (type === 'weekly') {
+        draft.scheduleData = {
+          days: draft.scheduleData?.days || [],
+          time: draft.scheduleData?.time || null,
+          repeat: prevRepeat
+        };
+      } else if (type === 'once') {
+        draft.scheduleData = {
+          date: draft.scheduleData?.date || null,
+          time: draft.scheduleData?.time || null,
+          repeat: prevRepeat
+        };
+      } else {
+        draft.scheduleData = {
+          time: draft.scheduleData?.time || null,
+          repeat: prevRepeat
+        };
+      }
 
       const prefix = draft.mode === 'edit' ? 'edit:sched' : 'create:schedule';
       const nextState =
@@ -391,6 +538,34 @@ export class WizardFlow {
 
       this.sessionRepo.set(sessionKey, nextState, draft);
       await safeAnswerCbQuery(ctx);
+      await this.renderStep(ctx, nextState, draft);
+      return true;
+    }
+
+    // Быстрый выбор даты (Сегодня / Завтра) для одноразового напоминания
+    if (
+      data.startsWith('wiz:date_pick:') &&
+      (state === 'create:schedule_date' || state === 'edit:date' || state === 'edit:sched_date')
+    ) {
+      const kind = data.slice('wiz:date_pick:'.length);
+      const tz = draft.timezone || 'Europe/Moscow';
+      const base = DateTime.now().setZone(tz);
+      const target = kind === 'tomorrow' ? base.plus({ days: 1 }) : base;
+      draft.scheduleData.date = target.toFormat('yyyy-MM-dd');
+
+      await safeAnswerCbQuery(ctx);
+      if (state === 'edit:date') {
+        try {
+          await this.finishEdit(ctx, sessionKey, draft.reminderId, {
+            scheduleData: { ...draft.scheduleData }
+          });
+        } catch (err) {
+          await ctx.reply(`⚠️ ${escapeHtml(err.message)}`, { parse_mode: 'HTML' });
+        }
+        return true;
+      }
+      const nextState = state === 'edit:sched_date' ? 'edit:sched_time' : 'create:schedule_time';
+      this.sessionRepo.set(sessionKey, nextState, draft);
       await this.renderStep(ctx, nextState, draft);
       return true;
     }
@@ -439,6 +614,113 @@ export class WizardFlow {
       return true;
     }
 
+    // Подтип: повторять ли внутри окна (после ввода времени)
+    if (
+      (data === 'wiz:rep:no' || data === 'wiz:rep:yes') &&
+      (state === 'create:repeat_ask' || state === 'edit:repeat_ask' || state === 'edit:sched_repeat_ask')
+    ) {
+      await safeAnswerCbQuery(ctx);
+      if (data === 'wiz:rep:no') {
+        draft.scheduleData.repeat = null;
+        if (state === 'edit:repeat_ask' || state === 'edit:sched_repeat_ask') {
+          await this.finishEdit(ctx, sessionKey, draft.reminderId, {
+            scheduleType: draft.scheduleType,
+            scheduleData: { ...draft.scheduleData },
+            stopOnComplete: false,
+            stopMode: 'none',
+            requiredCompletions: null
+          });
+          return true;
+        }
+        draft.stopOnComplete = false;
+        draft.stopMode = 'none';
+        draft.requiredCompletions = null;
+        this.sessionRepo.set(sessionKey, 'create:title', draft);
+        await this.renderStep(ctx, 'create:title', draft);
+        return true;
+      }
+
+      draft.scheduleData.repeat = draft.scheduleData.repeat || {
+        intervalMinutes: 30,
+        durationMinutes: 300
+      };
+      const nextState =
+        state === 'edit:repeat_ask'
+          ? 'edit:repeat_step'
+          : state === 'edit:sched_repeat_ask'
+            ? 'edit:sched_repeat_step'
+            : 'create:repeat_step';
+      this.sessionRepo.set(sessionKey, nextState, draft);
+      await this.renderStep(ctx, nextState, draft);
+      return true;
+    }
+
+    // Выбор интервала повторов (15 / 30 / 60 / 120 мин)
+    if (
+      data.startsWith('wiz:rep_step:') &&
+      (state === 'create:repeat_step' || state === 'edit:repeat_step' || state === 'edit:sched_repeat_step')
+    ) {
+      const mins = Number.parseInt(data.slice('wiz:rep_step:'.length), 10);
+      if (!Number.isInteger(mins) || mins < 1 || mins > 1440) {
+        await safeAnswerCbQuery(ctx, 'Некорректный интервал.', true);
+        return true;
+      }
+      draft.scheduleData.repeat = {
+        ...(draft.scheduleData.repeat || {}),
+        intervalMinutes: mins
+      };
+      const nextState =
+        state === 'edit:repeat_step'
+          ? 'edit:repeat_dur'
+          : state === 'edit:sched_repeat_step'
+            ? 'edit:sched_repeat_dur'
+            : 'create:repeat_duration';
+      this.sessionRepo.set(sessionKey, nextState, draft);
+      await safeAnswerCbQuery(ctx);
+      await this.renderStep(ctx, nextState, draft);
+      return true;
+    }
+
+    // Выбор длительности окна повторов
+    if (
+      data.startsWith('wiz:rep_dur:') &&
+      (state === 'create:repeat_duration' || state === 'edit:repeat_dur' || state === 'edit:sched_repeat_dur')
+    ) {
+      const mins = Number.parseInt(data.slice('wiz:rep_dur:'.length), 10);
+      const maxDur = draft.scheduleType === 'once' ? 10080 : 1439;
+      if (!Number.isInteger(mins) || mins < 0 || mins > maxDur) {
+        await safeAnswerCbQuery(ctx, 'Некорректная длительность.', true);
+        return true;
+      }
+      const intervalMins = Number(draft.scheduleData.repeat?.intervalMinutes || 1);
+      if (mins > 0 && mins < intervalMins) {
+        await safeAnswerCbQuery(
+          ctx,
+          'Длительность окна не может быть меньше интервала повторов.',
+          true
+        );
+        return true;
+      }
+
+      draft.scheduleData.repeat = {
+        ...draft.scheduleData.repeat,
+        durationMinutes: mins === 0 ? null : mins
+      };
+      await safeAnswerCbQuery(ctx);
+
+      if (state === 'edit:repeat_dur' || state === 'edit:sched_repeat_dur') {
+        await this.finishEdit(ctx, sessionKey, draft.reminderId, {
+          scheduleType: draft.scheduleType,
+          scheduleData: { ...draft.scheduleData }
+        });
+        return true;
+      }
+
+      this.sessionRepo.set(sessionKey, 'create:title', draft);
+      await this.renderStep(ctx, 'create:title', draft);
+      return true;
+    }
+
     // Пропуск шагов при создании
     if (data === 'wiz:skip_desc' && state === 'create:description') {
       draft.description = null;
@@ -474,8 +756,68 @@ export class WizardFlow {
 
     if ((data === 'wiz:comp_yes' || data === 'wiz:comp_no') && state === 'create:completion') {
       draft.completionEnabled = data === 'wiz:comp_yes';
+      draft.stopOnComplete = false;
+      draft.stopMode = 'none';
+      draft.requiredCompletions = null;
       this.sessionRepo.set(sessionKey, 'create:mentions', draft);
       await safeAnswerCbQuery(ctx);
+      await this.renderStep(ctx, 'create:mentions', draft);
+      return true;
+    }
+
+    if (data.startsWith('wiz:cm:') && (state === 'create:completion' || state === 'edit:completion')) {
+      const mode = data.slice('wiz:cm:'.length);
+      if (mode === 'off') {
+        draft.completionEnabled = false;
+        draft.stopOnComplete = false;
+        draft.stopMode = 'none';
+        draft.requiredCompletions = null;
+      } else if (mode === 'on') {
+        draft.completionEnabled = true;
+        draft.stopOnComplete = false;
+        draft.stopMode = 'none';
+        draft.requiredCompletions = null;
+      } else if (mode === 'stop_one') {
+        draft.completionEnabled = true;
+        draft.stopOnComplete = true;
+        draft.stopMode = 'any_one';
+        draft.requiredCompletions = null;
+      } else if (mode === 'stop_all') {
+        draft.completionEnabled = true;
+        draft.stopOnComplete = true;
+        draft.stopMode = 'all_members';
+        draft.requiredCompletions = null;
+      } else if (mode === 'stop_mentioned') {
+        draft.completionEnabled = true;
+        draft.stopOnComplete = true;
+        draft.stopMode = 'mentioned';
+        draft.requiredCompletions = null;
+      } else if (mode === 'stop_count') {
+        draft.completionEnabled = true;
+        draft.stopOnComplete = true;
+        draft.stopMode = 'custom_count';
+        const nextState = state === 'edit:completion' ? 'edit:stop_count' : 'create:stop_count';
+        this.sessionRepo.set(sessionKey, nextState, draft);
+        await safeAnswerCbQuery(ctx);
+        await this.renderStep(ctx, nextState, draft);
+        return true;
+      } else {
+        await safeAnswerCbQuery(ctx, 'Неизвестный режим.', true);
+        return true;
+      }
+
+      await safeAnswerCbQuery(ctx);
+      if (state === 'edit:completion') {
+        await this.finishEdit(ctx, sessionKey, draft.reminderId, {
+          completionEnabled: draft.completionEnabled,
+          stopOnComplete: draft.stopOnComplete,
+          stopMode: draft.stopMode,
+          requiredCompletions: draft.requiredCompletions
+        });
+        return true;
+      }
+
+      this.sessionRepo.set(sessionKey, 'create:mentions', draft);
       await this.renderStep(ctx, 'create:mentions', draft);
       return true;
     }
@@ -589,6 +931,7 @@ export class WizardFlow {
 
       try {
         const created = this.reminderService.createReminder(draft);
+        this.onReminderActivated?.();
         await safeAnswerCbQuery(ctx, 'Напоминание создано!');
         await renderMessage(
           ctx,
@@ -615,14 +958,12 @@ export class WizardFlow {
 
     const { state, data: draft } = session;
 
-    // Проверяем права (актуально для групп)
     const allowed = await this.permissionService.canManageContext({ contextType, contextId, userId });
     if (!allowed) {
       this.sessionRepo.delete(sessionKey);
       return false;
     }
 
-    // Настройка часового пояса из меню Настроек
     if (state === 'settings:tz_input') {
       return this.handleTimezoneTextInput(ctx, {
         sessionKey,
@@ -632,7 +973,6 @@ export class WizardFlow {
       });
     }
 
-    // Шаг фотографии (ожидает photo)
     if (state === 'create:photo' || state === 'edit:photo') {
       const photos = ctx.message?.photo;
       if (!photos || photos.length === 0) {
@@ -653,6 +993,78 @@ export class WizardFlow {
     const text = ctx.message?.text;
     if (typeof text !== 'string') {
       await ctx.reply('Пожалуйста, отправьте текстовое сообщение для этого шага.');
+      return true;
+    }
+
+    // Ввод собственного интервала повторов
+    if (state === 'create:repeat_step' || state === 'edit:repeat_step' || state === 'edit:sched_repeat_step') {
+      const parsed = parseIntervalMinutesInput(text);
+      if (!parsed.valid) {
+        await ctx.reply(`⚠️ ${escapeHtml(parsed.error)}`, { parse_mode: 'HTML' });
+        return true;
+      }
+      draft.scheduleData.repeat = {
+        ...(draft.scheduleData.repeat || {}),
+        intervalMinutes: parsed.value
+      };
+      const nextState =
+        state === 'edit:repeat_step'
+          ? 'edit:repeat_dur'
+          : state === 'edit:sched_repeat_step'
+            ? 'edit:sched_repeat_dur'
+            : 'create:repeat_duration';
+      this.sessionRepo.set(sessionKey, nextState, draft);
+      await this.renderStep(ctx, nextState, draft);
+      return true;
+    }
+
+    // Ввод собственной длительности окна повторов
+    if (state === 'create:repeat_duration' || state === 'edit:repeat_dur' || state === 'edit:sched_repeat_dur') {
+      const parsed = parseDurationMinutesInput(text, draft.scheduleType);
+      if (!parsed.valid) {
+        await ctx.reply(`⚠️ ${escapeHtml(parsed.error)}`, { parse_mode: 'HTML' });
+        return true;
+      }
+      const intervalMins = Number(draft.scheduleData.repeat?.intervalMinutes || 1);
+      if (parsed.value < intervalMins) {
+        await ctx.reply('⚠️ Длительность окна не может быть меньше интервала повторов.');
+        return true;
+      }
+      draft.scheduleData.repeat = {
+        ...draft.scheduleData.repeat,
+        durationMinutes: parsed.value
+      };
+      if (state === 'edit:repeat_dur' || state === 'edit:sched_repeat_dur') {
+        await this.finishEdit(ctx, sessionKey, draft.reminderId, {
+          scheduleType: draft.scheduleType,
+          scheduleData: { ...draft.scheduleData }
+        });
+        return true;
+      }
+      this.sessionRepo.set(sessionKey, 'create:title', draft);
+      await this.renderStep(ctx, 'create:title', draft);
+      return true;
+    }
+
+    // Ввод точного количества отметок выполнения для остановки повторов
+    if (state === 'create:stop_count' || state === 'edit:stop_count') {
+      const num = Number.parseInt(text.trim(), 10);
+      if (!Number.isInteger(num) || num < 1 || num > 1000) {
+        await ctx.reply('⚠️ Укажите целое число участников от 1 до 1000.');
+        return true;
+      }
+      draft.requiredCompletions = num;
+      if (state === 'edit:stop_count') {
+        await this.finishEdit(ctx, sessionKey, draft.reminderId, {
+          completionEnabled: true,
+          stopOnComplete: true,
+          stopMode: 'custom_count',
+          requiredCompletions: num
+        });
+        return true;
+      }
+      this.sessionRepo.set(sessionKey, 'create:mentions', draft);
+      await this.renderStep(ctx, 'create:mentions', draft);
       return true;
     }
 
@@ -715,19 +1127,13 @@ export class WizardFlow {
       }
 
       if (state === 'edit:sched_time') {
-        try {
-          await this.finishEdit(ctx, sessionKey, draft.reminderId, {
-            scheduleType: draft.scheduleType,
-            scheduleData: { ...draft.scheduleData }
-          });
-        } catch (err) {
-          await ctx.reply(`⚠️ ${escapeHtml(err.message)}`, { parse_mode: 'HTML' });
-        }
+        this.sessionRepo.set(sessionKey, 'edit:sched_repeat_ask', draft);
+        await this.renderStep(ctx, 'edit:sched_repeat_ask', draft);
         return true;
       }
 
-      this.sessionRepo.set(sessionKey, 'create:title', draft);
-      await this.renderStep(ctx, 'create:title', draft);
+      this.sessionRepo.set(sessionKey, 'create:repeat_ask', draft);
+      await this.renderStep(ctx, 'create:repeat_ask', draft);
       return true;
     }
 
@@ -950,8 +1356,8 @@ export class WizardFlow {
       case 'edit:sched_date':
         await renderMessage(
           ctx,
-          '📆 <b>Введите дату</b> в формате <code>ДД.ММ.ГГГГ</code> или <code>ГГГГ-ММ-ДД</code> (например, <code>25.12.2026</code>):',
-          { reply_markup: stepControlsKeyboard({ backCb: 'wiz:back', cancelCb: 'wiz:cancel' }) }
+          '📆 <b>Выберите дату</b> кнопкой или введите вручную в формате <code>ДД.ММ.ГГГГ</code> (например, <code>25.12.2026</code>):',
+          { reply_markup: dateQuickPickKeyboard({ backCb: 'wiz:back', cancelCb: 'wiz:cancel' }) }
         );
         break;
 
@@ -962,6 +1368,36 @@ export class WizardFlow {
           ctx,
           '🕒 <b>Введите время отправки</b> в формате <code>ЧЧ:ММ</code> (например, <code>09:00</code> или <code>18:30</code>):',
           { reply_markup: stepControlsKeyboard({ backCb: 'wiz:back', cancelCb: 'wiz:cancel' }) }
+        );
+        break;
+
+      case 'create:repeat_ask':
+      case 'edit:repeat_ask':
+      case 'edit:sched_repeat_ask':
+        await renderMessage(
+          ctx,
+          '🔁 <b>Повторять напоминание, если его ещё не выполнили?</b>\n\nМожно настроить повторную отправку каждые 15 мин, 30 мин или 1 час в течение нужного времени (например, 5 часов).',
+          { reply_markup: repeatAskKeyboard() }
+        );
+        break;
+
+      case 'create:repeat_step':
+      case 'edit:repeat_step':
+      case 'edit:sched_repeat_step':
+        await renderMessage(
+          ctx,
+          '⏱ <b>Как часто повторять напоминание?</b>\n\nВыберите готовый вариант или отправьте интервал текстом (например, <code>10</code> мин или <code>2ч</code>):',
+          { reply_markup: repeatStepKeyboard() }
+        );
+        break;
+
+      case 'create:repeat_duration':
+      case 'edit:repeat_dur':
+      case 'edit:sched_repeat_dur':
+        await renderMessage(
+          ctx,
+          '⏳ <b>В течение какого времени повторять напоминание?</b>\n\nВыберите длительность кнопкой или напишите в чат (например, <code>5</code> часов или <code>90м</code>):',
+          { reply_markup: repeatDurationKeyboard({ scheduleType: draft.scheduleType }) }
         );
         break;
 
@@ -1036,17 +1472,40 @@ export class WizardFlow {
         break;
 
       case 'create:completion':
+      case 'edit:completion':
+        if (draft.scheduleData?.repeat) {
+          const hint =
+            draft.contextType === 'group'
+              ? 'Кнопка «✅ Выполнено» будет общей для всех повторных сообщений серии. Выберите, когда останавливать повторы:'
+              : 'Кнопка «✅ Выполнено» будет общей для всех повторных сообщений серии. Остановить повторы, когда вы нажмёте «Выполнено»?';
+          await renderMessage(ctx, `✅ <b>Отметка «Выполнено» и автоостановка</b>\n\n${hint}`, {
+            reply_markup: repeatCompletionKeyboard({
+              contextType: draft.contextType,
+              hasMentions: Boolean(draft.mentionsData?.length > 0)
+            })
+          });
+        } else {
+          await renderMessage(
+            ctx,
+            '✅ <b>Включить кнопку «Выполнено»?</b>\n\nПри нажатии в группе бот покажет список выполнивших участников.',
+            {
+              reply_markup: booleanChoiceKeyboard({
+                yesText: '✅ Включить',
+                yesCb: 'wiz:comp_yes',
+                noText: '✖️ Не включать',
+                noCb: 'wiz:comp_no'
+              })
+            }
+          );
+        }
+        break;
+
+      case 'create:stop_count':
+      case 'edit:stop_count':
         await renderMessage(
           ctx,
-          '✅ <b>Включить кнопку «Выполнено»?</b>\n\nПри нажатии в группе бот покажет список выполнивших участников.',
-          {
-            reply_markup: booleanChoiceKeyboard({
-              yesText: '✅ Включить',
-              yesCb: 'wiz:comp_yes',
-              noText: '✖️ Не включать',
-              noCb: 'wiz:comp_no'
-            })
-          }
+          '🔢 <b>Сколько человек должны нажать «✅ Выполнено», чтобы остановить повторы?</b>\n\nОтправьте целое число (например, <code>3</code>):',
+          { reply_markup: stepControlsKeyboard({ backCb: 'wiz:back', cancelCb: 'wiz:cancel' }) }
         );
         break;
 
@@ -1109,7 +1568,12 @@ export class WizardFlow {
           `📄 <b>Описание:</b> ${draft.description ? `\n${draft.description}` : 'нет'}`,
           `🖼 <b>Фотография:</b> ${draft.photoFileId ? 'прикреплена ✅' : 'нет'}`,
           `🔗 <b>Кнопка-ссылка:</b> ${draft.linkTitle ? `${escapeHtml(draft.linkTitle)} (${escapeHtml(draft.linkUrl)})` : 'нет'}`,
-          `✅ <b>Кнопка «Выполнено»:</b> ${draft.completionEnabled ? 'включена' : 'выключена'}`,
+          `✅ <b>Кнопка «Выполнено»:</b> ${formatStopConditionLabel({
+            completionEnabled: draft.completionEnabled,
+            stopOnComplete: draft.stopOnComplete,
+            stopMode: draft.stopMode,
+            requiredCompletions: draft.requiredCompletions
+          })}`,
           `👥 <b>Упоминания:</b> ${formatMentionsPreview(draft.mentionsData)}`
         ];
 

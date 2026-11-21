@@ -7,6 +7,10 @@ export class TelegrafGateway {
     return this.telegram.getChatMember(chatId, userId);
   }
 
+  async getChatMemberCount(chatId) {
+    return this.telegram.getChatMemberCount(chatId);
+  }
+
   async sendMessage(chatId, text, extra = {}) {
     return this.telegram.sendMessage(chatId, text, extra);
   }

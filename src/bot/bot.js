@@ -17,6 +17,7 @@ export function createTelegramBot({
   permissionServiceFactory,
   deliveryServiceFactory,
   completionServiceFactory,
+  onReminderActivated = null,
   logger
 }) {
   const bot = new Telegraf(botToken);
@@ -24,7 +25,7 @@ export function createTelegramBot({
 
   const permissionService = permissionServiceFactory(telegramGateway);
   const deliveryService = deliveryServiceFactory(telegramGateway);
-  const completionService = completionServiceFactory(deliveryService);
+  const completionService = completionServiceFactory(deliveryService, telegramGateway);
 
   bot.catch((err, ctx) => {
     logger?.error('Неперехваченная ошибка Telegraf', {
@@ -63,6 +64,7 @@ export function createTelegramBot({
     reminderService,
     timezoneService,
     permissionService,
+    onReminderActivated,
     logger
   });
 

@@ -1,3 +1,4 @@
+import { buildCompletionSyncKey } from '../database/repositories/completion.repository.js';
 import { escapeHtml } from '../utils/validation.utils.js';
 
 function formatMentionTag(mention) {
@@ -66,7 +67,6 @@ export class DeliveryService {
         const lines = completions.map(formatCompletionLine);
         completionBlock = `\n\n<b>Выполнили: ${completions.length}</b>\n<blockquote expandable>${lines.join('\n')}</blockquote>`;
 
-        // Если список слишком большой и превышает лимит Telegram, сокращаем отображаемый хвост
         if (baseText.length + completionBlock.length > maxLen) {
           const kept = [];
           for (let i = 0; i < lines.length; i += 1) {
@@ -104,8 +104,9 @@ export class DeliveryService {
     }
 
     const { occurrence, reminder } = joined;
+    const syncKey = buildCompletionSyncKey(occurrence);
     const completions = reminder.completion_enabled
-      ? this.completionRepo.listByOccurrence(occurrence.id)
+      ? this.completionRepo.listBySyncKey(syncKey)
       : [];
 
     const text = this.buildReminderText(reminder, completions);
@@ -151,7 +152,8 @@ export class DeliveryService {
     const { occurrence, reminder } = joined;
     if (!occurrence.message_id || occurrence.status !== 'sent') return false;
 
-    const completions = this.completionRepo.listByOccurrence(occurrence.id);
+    const syncKey = buildCompletionSyncKey(occurrence);
+    const completions = this.completionRepo.listBySyncKey(syncKey);
     const text = this.buildReminderText(reminder, completions);
     const replyMarkup = this.buildInlineKeyboard(reminder, occurrence.id);
 
@@ -177,7 +179,6 @@ export class DeliveryService {
       if (msg.includes('message is not modified')) {
         return true;
       }
-      // Фоллбэк: если Telegram по какой-то причине отклонил blockquote expandable, пробуем без expandable
       if (msg.includes("can't parse entities") && text.includes('<blockquote expandable>')) {
         const fallbackText = text.replaceAll('<blockquote expandable>', '<blockquote>');
         if (occurrence.has_photo) {
@@ -203,5 +204,19 @@ export class DeliveryService {
       });
       return false;
     }
+  }
+
+  /**
+   * Синхронизирует отображение отметки «Выполнено» во всех уже отправленных сообщениях серии.
+   */
+  async refreshSeriesMessages(seriesId) {
+    if (!seriesId) return 0;
+    const sentOccurrences = this.occurrenceRepo.listSentBySeries(seriesId);
+    let updated = 0;
+    for (const occ of sentOccurrences) {
+      const ok = await this.refreshOccurrenceMessage(occ.id);
+      if (ok) updated += 1;
+    }
+    return updated;
   }
 }

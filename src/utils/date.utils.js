@@ -212,35 +212,16 @@ export function computeNextRunAt({
   throw new Error(`Неподдерживаемый тип расписания: ${scheduleType}`);
 }
 
-/**
- * Вычисляет пропущенные слоты (с ограничением maxMissed) и следующее будущее время запуска.
- */
-export function computeMissedAndNext({
+function collectBaseMissedSlots({
   scheduleType,
   scheduleData,
   timezone,
   currentNextRunAtIso,
-  nowUtc = DateTime.utc(),
-  maxMissed = 3
+  nowUtc,
+  maxMissed
 }) {
   const now = nowUtc instanceof DateTime ? nowUtc.toUTC() : DateTime.fromISO(nowUtc, { zone: 'utc' });
   const currentSlot = DateTime.fromISO(currentNextRunAtIso, { zone: 'utc' });
-
-  if (!currentSlot.isValid || currentSlot > now) {
-    return {
-      missedSlots: [],
-      totalMissed: 0,
-      nextRunAt: currentNextRunAtIso
-    };
-  }
-
-  if (scheduleType === 'once') {
-    return {
-      missedSlots: [currentSlot.toISO()],
-      totalMissed: 1,
-      nextRunAt: null
-    };
-  }
 
   const daysGap = now.diff(currentSlot, 'days').days;
   const collected = [];
@@ -287,6 +268,176 @@ export function computeMissedAndNext({
     totalMissed = Math.max(collected.length, Math.floor(daysGap));
   }
 
+  return { collected, totalMissed };
+}
+
+function computeRepeatWindowSlots({
+  scheduleType,
+  scheduleData,
+  timezone,
+  windowStartIso,
+  seriesId,
+  seriesEndsAtIso,
+  now,
+  maxMissed
+}) {
+  const intervalMinutes = Number(scheduleData.repeat.intervalMinutes);
+  const intervalMs = intervalMinutes * 60 * 1000;
+  const startMs = DateTime.fromISO(windowStartIso, { zone: 'utc' }).toMillis();
+  const nowMs = now.toMillis();
+  const endsAt = seriesEndsAtIso ? DateTime.fromISO(seriesEndsAtIso, { zone: 'utc' }) : null;
+  const endsMs = endsAt && endsAt.isValid ? endsAt.toMillis() : null;
+
+  const missedSlots = [];
+  let totalMissed = 0;
+
+  if (endsMs === null || startMs <= endsMs) {
+    const capMs = endsMs !== null ? Math.min(nowMs, endsMs) : nowMs;
+    if (capMs >= startMs) {
+      const stepsPassed = Math.floor((capMs - startMs) / intervalMs);
+      totalMissed = stepsPassed + 1;
+      const keepCount = Math.min(totalMissed, maxMissed);
+      for (let i = keepCount - 1; i >= 0; i -= 1) {
+        const slotMs = startMs + (stepsPassed - i) * intervalMs;
+        missedSlots.push(DateTime.fromMillis(slotMs, { zone: 'utc' }).toISO());
+      }
+    }
+  }
+
+  const nextStep = Math.floor((nowMs - startMs) / intervalMs) + 1;
+  const nextMs = startMs + nextStep * intervalMs;
+  const windowFinished = endsMs !== null && nextMs > endsMs;
+
+  if (windowFinished) {
+    const nextRunAt =
+      scheduleType === 'once'
+        ? null
+        : computeNextRunAt({
+            scheduleType,
+            scheduleData,
+            timezone,
+            fromUtc: now,
+            inclusive: false
+          });
+    return {
+      missedSlots,
+      totalMissed,
+      occurrenceSeriesId: seriesId,
+      nextRunAt,
+      nextSeriesId: null,
+      nextSeriesEndsAt: null
+    };
+  }
+
+  return {
+    missedSlots,
+    totalMissed,
+    occurrenceSeriesId: seriesId,
+    nextRunAt: DateTime.fromMillis(nextMs, { zone: 'utc' }).toISO(),
+    nextSeriesId: seriesId,
+    nextSeriesEndsAt: seriesEndsAtIso
+  };
+}
+
+/**
+ * Вычисляет пропущенные слоты (с ограничением maxMissed) и следующее будущее время запуска.
+ * Поддерживает подрежим повторов внутри окна (scheduleData.repeat) поверх once / daily / weekly.
+ */
+export function computeMissedAndNext({
+  scheduleType,
+  scheduleData,
+  timezone,
+  currentNextRunAtIso,
+  seriesId = null,
+  seriesEndsAtIso = null,
+  seriesIdFactory = () => `s_${Date.now()}`,
+  nowUtc = DateTime.utc(),
+  maxMissed = 3
+}) {
+  const now = nowUtc instanceof DateTime ? nowUtc.toUTC() : DateTime.fromISO(nowUtc, { zone: 'utc' });
+  const currentSlot = DateTime.fromISO(currentNextRunAtIso, { zone: 'utc' });
+
+  if (!currentSlot.isValid || currentSlot > now) {
+    return {
+      missedSlots: [],
+      totalMissed: 0,
+      occurrenceSeriesId: seriesId,
+      nextRunAt: currentNextRunAtIso,
+      nextSeriesId: seriesId,
+      nextSeriesEndsAt: seriesEndsAtIso
+    };
+  }
+
+  const repeat = scheduleData?.repeat;
+  if (repeat && Number(repeat.intervalMinutes) > 0) {
+    // 1. Уже внутри активной серии повторов
+    if (seriesId) {
+      return computeRepeatWindowSlots({
+        scheduleType,
+        scheduleData,
+        timezone,
+        windowStartIso: currentSlot.toISO(),
+        seriesId,
+        seriesEndsAtIso,
+        now,
+        maxMissed
+      });
+    }
+
+    // 2. Наступил базовый запуск (once / daily / weekly) -> открываем новую серию повторов
+    let windowStartIso = currentSlot.toISO();
+    if (scheduleType !== 'once') {
+      const { collected } = collectBaseMissedSlots({
+        scheduleType,
+        scheduleData,
+        timezone,
+        currentNextRunAtIso,
+        nowUtc: now,
+        maxMissed: 1
+      });
+      if (collected.length > 0) {
+        windowStartIso = collected[collected.length - 1];
+      }
+    }
+
+    const newSeriesId = seriesIdFactory();
+    const durMin = repeat.durationMinutes ? Number(repeat.durationMinutes) : null;
+    const newSeriesEndsAt = durMin
+      ? DateTime.fromISO(windowStartIso, { zone: 'utc' }).plus({ minutes: durMin }).toISO()
+      : null;
+
+    return computeRepeatWindowSlots({
+      scheduleType,
+      scheduleData,
+      timezone,
+      windowStartIso,
+      seriesId: newSeriesId,
+      seriesEndsAtIso: newSeriesEndsAt,
+      now,
+      maxMissed
+    });
+  }
+
+  if (scheduleType === 'once') {
+    return {
+      missedSlots: [currentSlot.toISO()],
+      totalMissed: 1,
+      occurrenceSeriesId: null,
+      nextRunAt: null,
+      nextSeriesId: null,
+      nextSeriesEndsAt: null
+    };
+  }
+
+  const { collected, totalMissed } = collectBaseMissedSlots({
+    scheduleType,
+    scheduleData,
+    timezone,
+    currentNextRunAtIso,
+    nowUtc: now,
+    maxMissed
+  });
+
   const missedSlots = collected.slice(-maxMissed);
   const nextRunAt = computeNextRunAt({
     scheduleType,
@@ -299,7 +450,10 @@ export function computeMissedAndNext({
   return {
     missedSlots,
     totalMissed,
-    nextRunAt
+    occurrenceSeriesId: null,
+    nextRunAt,
+    nextSeriesId: null,
+    nextSeriesEndsAt: null
   };
 }
 
@@ -314,24 +468,45 @@ export function formatTimezoneOffset(timezone) {
   return formatTimezoneHuman(timezone, { withCurrentTime: true });
 }
 
+export function formatIntervalMinutesRu(minutes) {
+  const m = Number(minutes);
+  if (!Number.isFinite(m) || m <= 0) return '—';
+  if (m % 60 === 0) {
+    const h = m / 60;
+    if (h === 1) return '1 час';
+    if (h >= 2 && h <= 4) return `${h} часа`;
+    return `${h} часов`;
+  }
+  return `${m} мин`;
+}
+
 export function formatScheduleSummary(scheduleType, scheduleData, timezone) {
   const time = scheduleData?.time || '00:00';
   const tzHuman = formatTimezoneHuman(timezone, { withCurrentTime: false });
+  const repeat = scheduleData?.repeat;
+  const repeatSuffix = repeat
+    ? `; повтор каждые ${formatIntervalMinutesRu(repeat.intervalMinutes)} (${
+        repeat.durationMinutes
+          ? `в течение ${formatIntervalMinutesRu(repeat.durationMinutes)}`
+          : 'пока не выполнят'
+      })`
+    : '';
+
   if (scheduleType === 'daily') {
-    return `Ежедневно в ${time} (${tzHuman})`;
+    return `Ежедневно в ${time}${repeatSuffix} (${tzHuman})`;
   }
   if (scheduleType === 'weekly') {
     const days = [...new Set((scheduleData?.days || []).map(Number))]
       .sort((a, b) => a - b)
       .map((d) => WEEKDAY_NAMES_RU[d] || d)
       .join(', ');
-    return `Еженедельно (${days}) в ${time} (${tzHuman})`;
+    return `Еженедельно (${days}) в ${time}${repeatSuffix} (${tzHuman})`;
   }
   if (scheduleType === 'once') {
     const formattedDate = scheduleData?.date
       ? DateTime.fromISO(scheduleData.date).toFormat('dd.MM.yyyy')
       : '—';
-    return `Одноразово: ${formattedDate} в ${time} (${tzHuman})`;
+    return `Одноразово: ${formattedDate} в ${time}${repeatSuffix} (${tzHuman})`;
   }
   return 'Неизвестное расписание';
 }

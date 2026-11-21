@@ -3,15 +3,15 @@ export class OccurrenceRepository {
     this.db = db;
   }
 
-  createOrGet({ reminderId, chatId, scheduledAt, status = 'queued' }) {
+  createOrGet({ reminderId, chatId, scheduledAt, seriesId = null, status = 'queued' }) {
     const now = new Date().toISOString();
     const insertResult = this.db
       .prepare(`
         INSERT OR IGNORE INTO reminder_occurrences (
-          reminder_id, chat_id, scheduled_at, status, created_at
-        ) VALUES (?, ?, ?, ?, ?)
+          reminder_id, chat_id, scheduled_at, series_id, status, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
       `)
-      .run(Number(reminderId), Number(chatId), scheduledAt, status, now);
+      .run(Number(reminderId), Number(chatId), scheduledAt, seriesId, status, now);
 
     const row = this.db
       .prepare('SELECT * FROM reminder_occurrences WHERE reminder_id = ? AND scheduled_at = ?')
@@ -29,6 +29,17 @@ export class OccurrenceRepository {
     );
   }
 
+  listSentBySeries(seriesId) {
+    if (!seriesId) return [];
+    return this.db
+      .prepare(`
+        SELECT * FROM reminder_occurrences
+        WHERE series_id = ? AND status = 'sent' AND message_id IS NOT NULL
+        ORDER BY id ASC
+      `)
+      .all(seriesId);
+  }
+
   findWithReminder(id) {
     const row = this.db
       .prepare(`
@@ -40,11 +51,16 @@ export class OccurrenceRepository {
           r.link_title AS r_link_title,
           r.link_url AS r_link_url,
           r.completion_enabled AS r_completion_enabled,
+          r.stop_on_complete AS r_stop_on_complete,
+          r.stop_mode AS r_stop_mode,
+          r.required_completions AS r_required_completions,
           r.mentions_enabled AS r_mentions_enabled,
           r.mentions_data AS r_mentions_data,
           r.context_type AS r_context_type,
           r.context_id AS r_context_id,
-          r.schedule_type AS r_schedule_type
+          r.schedule_type AS r_schedule_type,
+          r.is_active AS r_is_active,
+          r.is_archived AS r_is_archived
         FROM reminder_occurrences o
         JOIN reminders r ON r.id = o.reminder_id
         WHERE o.id = ?
@@ -58,6 +74,7 @@ export class OccurrenceRepository {
         reminder_id: row.reminder_id,
         chat_id: row.chat_id,
         scheduled_at: row.scheduled_at,
+        series_id: row.series_id,
         status: row.status,
         sent_at: row.sent_at,
         message_id: row.message_id,
@@ -74,11 +91,16 @@ export class OccurrenceRepository {
         link_title: row.r_link_title,
         link_url: row.r_link_url,
         completion_enabled: Boolean(row.r_completion_enabled),
+        stop_on_complete: Boolean(row.r_stop_on_complete),
+        stop_mode: row.r_stop_mode || 'none',
+        required_completions: row.r_required_completions,
         mentions_enabled: Boolean(row.r_mentions_enabled),
         mentions_data: JSON.parse(row.r_mentions_data || '[]'),
         context_type: row.r_context_type,
         context_id: row.r_context_id,
-        schedule_type: row.r_schedule_type
+        schedule_type: row.r_schedule_type,
+        is_active: Boolean(row.r_is_active),
+        is_archived: Boolean(row.r_is_archived)
       }
     };
   }

@@ -31,6 +31,8 @@ export function registerCallbackAndMessageHandlers({
         });
         if (!res.ok) {
           await safeAnswerCbQuery(ctx, res.reason, true);
+        } else if (res.seriesStopped) {
+          await safeAnswerCbQuery(ctx, '✅ Выполнено! Серия напоминаний завершена.');
         } else {
           await safeAnswerCbQuery(
             ctx,
